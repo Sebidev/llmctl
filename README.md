@@ -44,7 +44,6 @@ Build from source (Go):
 ```bash
 git clone https://github.com/sebidev/llmctl.git
 cd llmctl
-go get github.com/openai/openai-go/v3 
 go build -o llmctl
 ````
 
