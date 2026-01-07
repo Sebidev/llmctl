@@ -1,8 +1,8 @@
 package counter
 
-func Add(cur State, add State) State {
-	cur.PromptTokens += add.PromptTokens
-	cur.CompletionTokens += add.CompletionTokens
-	cur.TotalTokens += add.TotalTokens
-	return cur
+func Add(s State, prompt, completion int64) State {
+	s.PromptTokens += prompt
+	s.CompletionTokens += completion
+	s.TotalTokens += prompt + completion
+	return s
 }

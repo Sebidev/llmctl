@@ -34,6 +34,7 @@ LLMs are treated as **stateless text processors**, not autonomous agents.
 - Easy integration with editors, pipes, and scripts
 - No automatic code execution
 - No filesystem side effects unless you explicitly redirect output
+- Estimated token counter
 
 ---
 
