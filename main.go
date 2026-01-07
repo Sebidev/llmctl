@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"llmctl/counter"
 	"os"
 	"strings"
 	"time"
@@ -39,6 +40,14 @@ func tailString(s string, max int) string {
 	return s[len(s)-max:]
 }
 
+func getenv(k, def string) string {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	return v
+}
+
 func main() {
 	var (
 		model       = flag.String("model", getenv("LLM_MODEL", "gpt-5.2"), "Model name")
@@ -47,7 +56,41 @@ func main() {
 		tail        = flag.Int("tail", 12000, "Max chars to take from context file (tail)")
 		timeout     = flag.Duration("timeout", 5*time.Minute, "Request timeout")
 		baseURL     = flag.String("base-url", os.Getenv("OPENAI_BASE_URL"), "Optional base URL (OpenAI-compatible)")
+		verbose     = flag.Bool("v", false, "Verbose (stderr only)")
 	)
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, `llmctl – minimal LLM CLI
+
+USAGE:
+llmctl [options] "prompt"
+llmctl counter
+llmctl counter reset
+
+OPTIONS:
+--model <name>        Model name (default from LLM_MODEL)
+--context <file>      Append context file (tail)
+--tail <chars>        Max chars from context (default 12000)
+--timeout <duration> Request timeout
+--base-url <url>      OpenAI-compatible base URL
+-v                    Verbose (stderr only)
+
+ENVIRONMENT:
+OPENAI_API_KEY
+OPENAI_BASE_URL
+LLM_MODEL
+LLM_SYSTEM
+
+SUBCOMMANDS:
+counter               Show total token usage
+counter reset         Reset token counter
+
+PIPE EXAMPLES:
+llmctl "hello world c++"
+llmctl --context notes.md "extend section 5" >> notes.md
+cat file.txt | llmctl "summarize"
+
+`)
+	}
 	flag.Parse()
 
 	promptArgs := strings.TrimSpace(strings.Join(flag.Args(), " "))
@@ -58,7 +101,7 @@ func main() {
 	}
 
 	if promptArgs == "" && strings.TrimSpace(stdinText) == "" {
-		fmt.Fprintln(os.Stderr, "usage: llm [--model ...] [--context file] \"your prompt\"")
+		fmt.Fprintln(os.Stderr, "usage: llmctl [options] \"your prompt\"")
 		os.Exit(2)
 	}
 
@@ -70,6 +113,11 @@ func main() {
 			os.Exit(2)
 		}
 		ctxBuf.WriteString(tailString(string(b), *tail))
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "counter" {
+		runCounter(os.Args[2:])
+		return
 	}
 
 	// Prompt bauen: Kontext + stdin + args
@@ -91,15 +139,13 @@ func main() {
 
 	// Client
 	opts := []option.RequestOption{}
-	// API Key kommt standardmäßig aus OPENAI_API_KEY :contentReference[oaicite:1]{index=1}
 	if *baseURL != "" {
 		opts = append(opts, option.WithBaseURL(*baseURL))
 	}
-
 	client := openai.NewClient(opts...)
 
 	// Messages
-	msgs := []openai.ChatCompletionMessageParamUnion{}
+	var msgs []openai.ChatCompletionMessageParamUnion
 	if strings.TrimSpace(*system) != "" {
 		msgs = append(msgs, openai.SystemMessage(*system))
 	}
@@ -108,14 +154,13 @@ func main() {
 	reqCtx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	// Streaming
 	stream := client.Chat.Completions.NewStreaming(reqCtx, openai.ChatCompletionNewParams{
 		Messages: msgs,
-		Model:    shared.ChatModel(*model), // Model als String
+		Model:    shared.ChatModel(*model),
 	})
 
-	// Optional: Accumulator für “am Ende nochmal alles haben”
-	acc := openai.ChatCompletionAccumulator{}
+	// Accumulator (für usage & final content)
+	var acc openai.ChatCompletionAccumulator
 
 	w := bufio.NewWriter(os.Stdout)
 	defer w.Flush()
@@ -124,27 +169,38 @@ func main() {
 		chunk := stream.Current()
 		acc.AddChunk(chunk)
 
-		// delta content direkt nach stdout
 		if len(chunk.Choices) > 0 {
-			io.WriteString(w, chunk.Choices[0].Delta.Content)
+			if delta := chunk.Choices[0].Delta.Content; delta != "" {
+				io.WriteString(w, delta)
+			}
 		}
 	}
 
 	if err := stream.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "\nstream error:", err)
+		fmt.Fprintln(os.Stderr, "stream error:", err)
 		os.Exit(1)
 	}
 
-	// Wenn du willst: am Ende newline erzwingen
-	if !strings.HasSuffix(acc.Choices[0].Message.Content, "\n") {
-		fmt.Fprintln(w)
+	// Newline erzwingen, falls Modell ohne endet
+	if len(acc.Choices) > 0 {
+		out := acc.Choices[0].Message.Content
+		if out != "" && !strings.HasSuffix(out, "\n") {
+			fmt.Fprintln(w)
+		}
 	}
-}
 
-func getenv(k, def string) string {
-	v := os.Getenv(k)
-	if v == "" {
-		return def
+	// ---- Usage / Token Counter Hook (stderr only!) ----
+	if acc.Usage.TotalTokens > 0 {
+		s, err := counter.Load()
+		if err == nil {
+			s = counter.Add(s, counter.State{
+				PromptTokens:     int(acc.Usage.PromptTokens),
+				CompletionTokens: int(acc.Usage.CompletionTokens),
+				TotalTokens:      int(acc.Usage.TotalTokens),
+			})
+			_ = counter.Save(s)
+		}
+	} else if *verbose {
+		fmt.Fprintln(os.Stderr, "[llmctl] backend did not provide token usage")
 	}
-	return v
 }
